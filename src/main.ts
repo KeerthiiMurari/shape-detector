@@ -159,7 +159,8 @@ export class ShapeDetector {
         resolve(imageData);
       };
       img.onerror = reject;
-      img.src = URL.createObjectURL(file);
+      img.src = `/public/${fileName}`;
+
     });
   }
 }
