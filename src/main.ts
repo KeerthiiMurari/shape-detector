@@ -1,4 +1,31 @@
-class ShapeDetector {
+import "./style.css";
+
+export interface Point {
+  x: number;
+  y: number;
+}
+
+export interface DetectedShape {
+  type: "circle" | "triangle" | "rectangle" | "pentagon" | "star";
+  confidence: number;
+  boundingBox: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  };
+  center: Point;
+  area: number;
+}
+
+export interface DetectionResult {
+  shapes: DetectedShape[];
+  processingTime: number;
+  imageWidth: number;
+  imageHeight: number;
+}
+
+export class ShapeDetector {
   private canvas: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
 
@@ -7,7 +34,7 @@ class ShapeDetector {
     this.ctx = canvas.getContext("2d")!;
   }
 
-  // Convert image to grayscale
+  // Convert to grayscale
   private toGray(imageData: ImageData): Uint8ClampedArray {
     const gray = new Uint8ClampedArray(imageData.width * imageData.height);
     const data = imageData.data;
@@ -36,37 +63,36 @@ class ShapeDetector {
           }
         }
         const magnitude = Math.sqrt(sumX * sumX + sumY * sumY);
-        edges[y * width + x] = magnitude > 100 ? 255 : 0; // threshold
+        edges[y * width + x] = magnitude > 100 ? 255 : 0;
       }
     }
     return edges;
   }
 
-  // Detect and classify simple shapes
-  async detectShapes(imageData: ImageData): Promise<void> {
+  // Detect and classify shapes
+  async detectShapes(imageData: ImageData): Promise<DetectionResult> {
+    const startTime = performance.now();
     const gray = this.toGray(imageData);
     const edges = this.sobel(gray, imageData.width, imageData.height);
 
-    const shapes: { cx: number; cy: number; type: string }[] = [];
-
-    // Very basic blob-based detection
-    const visited = new Set<number>();
     const width = imageData.width;
     const height = imageData.height;
-
+    const visited = new Set<number>();
     const getIdx = (x: number, y: number) => y * width + x;
+
+    const shapes: DetectedShape[] = [];
 
     for (let y = 1; y < height - 1; y++) {
       for (let x = 1; x < width - 1; x++) {
         const idx = getIdx(x, y);
         if (edges[idx] === 255 && !visited.has(idx)) {
-          // BFS to get connected points
           const queue = [[x, y]];
           const points: [number, number][] = [];
+
           while (queue.length) {
             const [cx, cy] = queue.pop()!;
-            const i = getIdx(cx, cy);
             if (cx < 0 || cy < 0 || cx >= width || cy >= height) continue;
+            const i = getIdx(cx, cy);
             if (edges[i] === 0 || visited.has(i)) continue;
 
             visited.add(i);
@@ -77,56 +103,108 @@ class ShapeDetector {
                 queue.push([cx + dx, cy + dy]);
           }
 
-          // Rough centroid
-          const cx = points.reduce((a, p) => a + p[0], 0) / points.length;
-          const cy = points.reduce((a, p) => a + p[1], 0) / points.length;
+          if (points.length < 80) continue; // ignore small noise
 
-          // Classify shape (basic heuristic)
-          let type = "Unknown";
-          const size = points.length;
+          const xs = points.map(p => p[0]);
+          const ys = points.map(p => p[1]);
+          const minX = Math.min(...xs);
+          const maxX = Math.max(...xs);
+          const minY = Math.min(...ys);
+          const maxY = Math.max(...ys);
 
-          if (size < 50) continue; // ignore noise
-          if (size < 300) type = "Triangle";
-          else if (size < 600) type = "Rectangle";
-          else if (size > 600) type = "Circle";
+          const cx = xs.reduce((a, b) => a + b, 0) / xs.length;
+          const cy = ys.reduce((a, b) => a + b, 0) / ys.length;
+          const area = (maxX - minX) * (maxY - minY);
 
-          shapes.push({ cx, cy, type });
+          // Heuristic shape classification
+          let type: DetectedShape["type"] = "circle";
+          if (points.length < 400) type = "triangle";
+          else if (points.length < 900) type = "rectangle";
+          else if (points.length < 1500) type = "pentagon";
+          else type = "circle";
+
+          shapes.push({
+            type,
+            confidence: 0.7,
+            boundingBox: {
+              x: minX,
+              y: minY,
+              width: maxX - minX,
+              height: maxY - minY,
+            },
+            center: { x: cx, y: cy },
+            area,
+          });
         }
       }
     }
 
-    // Draw results
-    const ctx = this.ctx;
-    ctx.putImageData(imageData, 0, 0);
-    ctx.font = "16px Arial";
-    ctx.fillStyle = "red";
-    shapes.forEach((s) => {
-      ctx.fillText(s.type, s.cx, s.cy);
-    });
+    const processingTime = performance.now() - startTime;
+    return {
+      shapes,
+      processingTime,
+      imageWidth: width,
+      imageHeight: height,
+    };
+  }
 
-    console.log("Detected shapes:", shapes);
+  async loadImage(file: File): Promise<ImageData> {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => {
+        this.canvas.width = img.width;
+        this.canvas.height = img.height;
+        this.ctx.drawImage(img, 0, 0);
+        const imageData = this.ctx.getImageData(0, 0, img.width, img.height);
+        resolve(imageData);
+      };
+      img.onerror = reject;
+      img.src = URL.createObjectURL(file);
+    });
   }
 }
 
-// Usage
-window.onload = () => {
-  const canvas = document.getElementById("canvas") as HTMLCanvasElement;
-  const input = document.getElementById("fileInput") as HTMLInputElement;
-  const ctx = canvas.getContext("2d")!;
+document.addEventListener("DOMContentLoaded", () => {
+  const canvas = document.getElementById("originalCanvas") as HTMLCanvasElement;
+  const fileInput = document.getElementById("imageInput") as HTMLInputElement;
+  const resultsDiv = document.getElementById("results") as HTMLDivElement;
+
   const detector = new ShapeDetector(canvas);
 
-  input.addEventListener("change", (e) => {
+  fileInput.addEventListener("change", async (e) => {
     const file = (e.target as HTMLInputElement).files?.[0];
     if (!file) return;
-    const img = new Image();
-    img.onload = async () => {
-      canvas.width = img.width;
-      canvas.height = img.height;
-      ctx.drawImage(img, 0, 0);
-      const imgData = ctx.getImageData(0, 0, img.width, img.height);
-      await detector.detectShapes(imgData);
-    };
-    img.src = URL.createObjectURL(file);
+    resultsDiv.innerHTML = "<p>Processing...</p>";
+
+    const imageData = await detector.loadImage(file);
+    const results = await detector.detectShapes(imageData);
+
+    const { shapes, processingTime } = results;
+
+    let html = `
+      <p><strong>Processing Time:</strong> ${processingTime.toFixed(2)}ms</p>
+      <p><strong>Shapes Found:</strong> ${shapes.length}</p>
+    `;
+
+    if (shapes.length > 0) {
+      html += "<h4>Detected Shapes:</h4><ul>";
+      shapes.forEach((shape) => {
+        html += `
+          <li>
+            <strong>${shape.type}</strong><br>
+            Confidence: ${(shape.confidence * 100).toFixed(1)}%<br>
+            Center: (${shape.center.x.toFixed(1)}, ${shape.center.y.toFixed(1)})<br>
+            Area: ${shape.area.toFixed(1)}px²
+          </li>
+        `;
+      });
+      html += "</ul>";
+    } else {
+      html += "<p>No shapes detected.</p>";
+    }
+
+    resultsDiv.innerHTML = html;
   });
-};
+});
+
 
